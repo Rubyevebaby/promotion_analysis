@@ -178,11 +178,11 @@ def build_event_summary(
         "이벤트 ID (식별자)",
         "조회 수 (진행 기간)",
         "조회 수 (이전 기간)",
-        "조회 수 Diff",
+        "조회 수 증감량",
         "조회 수 증감률",
         "상담신청 수 (진행 기간)",
         "상담신청 수 (이전 기간)",
-        "상담신청 수 Diff",
+        "상담신청 수 증감량",
         "상담신청 수 증감률",
     ]
     existing_columns = [col for col in columns_order if col in summary.columns]
