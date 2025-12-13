@@ -164,7 +164,7 @@ def build_event_summary(
     for metric in metrics:
         current_col = f"{metric} (진행 기간)"
         previous_col = f"{metric} (이전 기간)"
-        diff_col = f"{metric} Diff"
+        diff_col = f"{metric} 증감량"
         summary[diff_col] = summary[current_col] - summary[previous_col]
         rate_col = f"{metric} 증감률"
         summary[rate_col] = np.where(
@@ -204,7 +204,7 @@ def generate_event_insights(summary_df: pd.DataFrame, top_n: int = 3) -> list[di
     insights: list[dict] = []
     metrics = ["조회 수", "상담신청 수"]
     for metric in metrics:
-        diff_col = f"{metric} Diff"
+        diff_col = f"{metric} 증감량"
         if diff_col not in summary_df:
             continue
         positive = summary_df[summary_df[diff_col] > 0]
