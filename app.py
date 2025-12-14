@@ -138,6 +138,17 @@ def build_event_summary(
     event_lookup: dict[str, str],
 ) -> pd.DataFrame:
     metrics = ["조회 수", "상담신청 수"]
+    hospital_info = (
+        pd.concat(
+            [
+                current_df[["이벤트 ID (식별자)", "병원 이름"]],
+                previous_df[["이벤트 ID (식별자)", "병원 이름"]],
+            ],
+            ignore_index=True,
+        )
+        .dropna(subset=["이벤트 ID (식별자)"])
+        .drop_duplicates(subset=["이벤트 ID (식별자)"])
+    )
     summary = (
         current_df.groupby("이벤트 ID (식별자)")[metrics]
         .sum()
@@ -160,6 +171,7 @@ def build_event_summary(
     )
     summary = summary.merge(previous, on="이벤트 ID (식별자)", how="outer").fillna(0)
     summary["이벤트 이름"] = summary["이벤트 ID (식별자)"].map(event_lookup)
+    summary = summary.merge(hospital_info, on="이벤트 ID (식별자)", how="left")
 
     for metric in metrics:
         current_col = f"{metric} (진행 기간)"
@@ -175,6 +187,7 @@ def build_event_summary(
 
     columns_order = [
         "이벤트 이름",
+        "병원 이름",
         "이벤트 ID (식별자)",
         "조회 수 (진행 기간)",
         "조회 수 (이전 기간)",
