@@ -33,14 +33,37 @@ REQUIRED_COLUMNS = [
 
 COLUMN_ALIASES = {
     "이벤트 ID (식별자)": ["이벤트 ID (식별자)", "이벤트 ID"],
+    "병원 이름": ["병원 이름", "병원명"],
+}
+
+CPV_REQUIRED_COLUMNS = [
+    "병원 ID",
+    "병원 이름",
+    "이벤트 ID (식별자)",
+    "이벤트 이름",
+    "대상일",
+    "CPV 조회 수",
+    "CPV 매출",
+]
+
+CPV_COLUMN_ALIASES = {
+    "이벤트 ID (식별자)": ["이벤트 ID (식별자)", "이벤트 ID"],
+    "병원 이름": ["병원 이름", "병원명"],
+    "이벤트 이름": ["이벤트 이름", "이벤트명"],
+    "CPV 조회 수": ["CPV 조회 수"],
+    "CPV 매출": ["CPV 매출"],
 }
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_columns(
+    df: pd.DataFrame,
+    required_columns: list[str],
+    aliases: dict[str, list[str]],
+) -> pd.DataFrame:
     rename_map = {}
     missing = []
-    for required in REQUIRED_COLUMNS:
-        candidates = COLUMN_ALIASES.get(required, [required])
+    for required in required_columns:
+        candidates = aliases.get(required, [required])
         matched = next((c for c in candidates if c in df.columns), None)
         if matched:
             rename_map[matched] = required
@@ -54,7 +77,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=True)
 def load_data(file) -> pd.DataFrame:
     df = pd.read_csv(file, encoding="utf-8-sig")
-    df = normalize_columns(df)
+    df = normalize_columns(df, REQUIRED_COLUMNS, COLUMN_ALIASES)
 
     df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
     if df["대상일"].isna().any():
@@ -65,6 +88,21 @@ def load_data(file) -> pd.DataFrame:
             pd.to_numeric(df[metric_col], errors="coerce")
             .fillna(0)
             .astype(int)
+        )
+    df["이벤트 ID (식별자)"] = df["이벤트 ID (식별자)"].astype(str)
+    return df
+
+
+@st.cache_data(show_spinner=True)
+def load_cpv_data(file) -> pd.DataFrame:
+    df = pd.read_csv(file, encoding="utf-8-sig")
+    df = normalize_columns(df, CPV_REQUIRED_COLUMNS, CPV_COLUMN_ALIASES)
+    df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
+    if df["대상일"].isna().any():
+        raise ValueError("CPV 데이터의 대상일 컬럼에 변환할 수 없는 값이 있습니다.")
+    for metric_col in ["CPV 조회 수", "CPV 매출"]:
+        df[metric_col] = (
+            pd.to_numeric(df[metric_col], errors="coerce").fillna(0).astype(int)
         )
     df["이벤트 ID (식별자)"] = df["이벤트 ID (식별자)"].astype(str)
     return df
@@ -135,21 +173,39 @@ def filter_period(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp):
 def build_event_summary(
     current_df: pd.DataFrame,
     previous_df: pd.DataFrame,
+    cpv_current_df: pd.DataFrame,
+    cpv_previous_df: pd.DataFrame,
     event_lookup: dict[str, str],
 ) -> pd.DataFrame:
     metrics = ["조회 수", "상담신청 수"]
+    hospital_sources = [
+        current_df[["이벤트 ID (식별자)", "병원 이름"]],
+        previous_df[["이벤트 ID (식별자)", "병원 이름"]],
+        cpv_current_df[["이벤트 ID (식별자)", "병원 이름"]],
+        cpv_previous_df[["이벤트 ID (식별자)", "병원 이름"]],
+    ]
     hospital_info = (
-        pd.concat(
-            [
-                current_df[["이벤트 ID (식별자)", "병원 이름"]],
-                previous_df[["이벤트 ID (식별자)", "병원 이름"]],
-            ],
-            ignore_index=True,
-        )
+        pd.concat(hospital_sources, ignore_index=True)
         .dropna(subset=["이벤트 ID (식별자)"])
         .drop_duplicates(subset=["이벤트 ID (식별자)"])
     )
-    summary = (
+    id_sources = [
+        current_df["이벤트 ID (식별자)"],
+        previous_df["이벤트 ID (식별자)"],
+        cpv_current_df["이벤트 ID (식별자)"],
+        cpv_previous_df["이벤트 ID (식별자)"],
+    ]
+    combined_ids = (
+        pd.concat(id_sources, ignore_index=True)
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+    summary = pd.DataFrame({"이벤트 ID (식별자)": combined_ids})
+    if summary.empty:
+        return summary
+
+    current = (
         current_df.groupby("이벤트 ID (식별자)")[metrics]
         .sum()
         .reset_index()
@@ -169,11 +225,35 @@ def build_event_summary(
             }
         )
     )
-    summary = summary.merge(previous, on="이벤트 ID (식별자)", how="outer").fillna(0)
+    summary = summary.merge(current, on="이벤트 ID (식별자)", how="left")
+    summary = summary.merge(previous, on="이벤트 ID (식별자)", how="left")
     summary["이벤트 이름"] = summary["이벤트 ID (식별자)"].map(event_lookup)
     summary = summary.merge(hospital_info, on="이벤트 ID (식별자)", how="left")
 
-    for metric in metrics:
+    cpv_metrics = ["CPV 조회 수", "CPV 매출"]
+    cpv_current = (
+        cpv_current_df.groupby("이벤트 ID (식별자)")[cpv_metrics]
+        .sum()
+        .reset_index()
+        .rename(columns={metric: f"{metric} (진행 기간)" for metric in cpv_metrics})
+    )
+    cpv_previous = (
+        cpv_previous_df.groupby("이벤트 ID (식별자)")[cpv_metrics]
+        .sum()
+        .reset_index()
+        .rename(columns={metric: f"{metric} (이전 기간)" for metric in cpv_metrics})
+    )
+    summary = summary.merge(cpv_current, on="이벤트 ID (식별자)", how="left")
+    summary = summary.merge(cpv_previous, on="이벤트 ID (식별자)", how="left")
+
+    all_metrics = metrics + cpv_metrics
+    for metric in all_metrics:
+        for period in ["진행 기간", "이전 기간"]:
+            col = f"{metric} ({period})"
+            if col not in summary:
+                summary[col] = 0
+            else:
+                summary[col] = summary[col].fillna(0)
         current_col = f"{metric} (진행 기간)"
         previous_col = f"{metric} (이전 기간)"
         diff_col = f"{metric} 증감량"
@@ -197,6 +277,10 @@ def build_event_summary(
         "상담신청 수 (이전 기간)",
         "상담신청 수 증감량",
         "상담신청 수 증감률",
+        "CPV 매출 (진행 기간)",
+        "CPV 매출 (이전 기간)",
+        "CPV 매출 증감량",
+        "CPV 매출 증감률",
     ]
     existing_columns = [col for col in columns_order if col in summary.columns]
     return summary[existing_columns].sort_values(
@@ -215,19 +299,21 @@ def generate_event_insights(summary_df: pd.DataFrame, top_n: int = 3) -> list[di
         ]
 
     insights: list[dict] = []
-    metrics = ["조회 수", "상담신청 수"]
+    metrics = ["조회 수", "상담신청 수", "CPV 매출"]
     for metric in metrics:
         diff_col = f"{metric} 증감량"
+        diff_rate_col = f"{metric} 증감률"
         if diff_col not in summary_df:
             continue
         positive = summary_df[summary_df[diff_col] > 0]
 
         if not positive.empty:
             top_positive = positive.sort_values(diff_col, ascending=False).head(top_n)
+            unit = "원" if "매출" in metric else "건"
             items = [
                 {
                     "label": row.get("이벤트 이름") or row["이벤트 ID (식별자)"],
-                    "value": f"+{int(row[diff_col]):,}건",
+                    "value": f"+{int(row[diff_col]):,}{unit}",
                 }
                 for _, row in top_positive.iterrows()
             ]
@@ -238,6 +324,27 @@ def generate_event_insights(summary_df: pd.DataFrame, top_n: int = 3) -> list[di
                     "items": items,
                 }
             )
+
+        if metric == "CPV 매출" and diff_rate_col in summary_df:
+            positive_rate = summary_df[summary_df[diff_rate_col] > 0]
+            if not positive_rate.empty:
+                top_rate = positive_rate.sort_values(
+                    diff_rate_col, ascending=False
+                ).head(top_n)
+                items_rate = [
+                    {
+                        "label": row.get("이벤트 이름") or row["이벤트 ID (식별자)"],
+                        "value": f"+{row[diff_rate_col]:.1f}%",
+                    }
+                    for _, row in top_rate.iterrows()
+                ]
+                insights.append(
+                    {
+                        "title": f"{metric} 증감률 TOP {len(items_rate)}",
+                        "badge": f"{metric} 증감률",
+                        "items": items_rate,
+                    }
+                )
 
 
     if not insights:
@@ -257,16 +364,15 @@ def format_event_summary_display(summary_df: pd.DataFrame) -> pd.DataFrame:
         col
         for col in display_df.columns
         if (
-            ("조회 수" in col or "상담신청 수" in col)
+            ("조회 수" in col or "상담신청 수" in col or "CPV 매출" in col)
             and "증감률" not in col
-            and "전환율" not in col
         )
     ]
     rate_cols = [col for col in display_df.columns if "증감률" in col]
 
     for col in number_cols:
         display_df[col] = display_df[col].apply(
-            lambda x: f"{int(x):,}" if pd.notna(x) else "-"
+            lambda x: f"{int(x):,}" if pd.notna(x) and x != 0 else "-"
         )
     for col in rate_cols:
         display_df[col] = display_df[col].apply(
@@ -279,8 +385,7 @@ def render_insight_cards(insights: list[dict]):
     if not insights:
         st.info("표시할 인사이트가 없습니다.")
         return
-    columns_count = min(3, len(insights))
-    cols = st.columns(columns_count)
+    columns_per_row = min(2, len(insights))
     card_template = dedent(
         """
         <div style="
@@ -312,9 +417,10 @@ def render_insight_cards(insights: list[dict]):
         </div>
         """
     ).strip()
-    for idx, insight in enumerate(insights):
-        column = cols[idx % columns_count]
-        with column:
+    for start in range(0, len(insights), columns_per_row):
+        cols = st.columns(columns_per_row)
+        row_insights = insights[start : start + columns_per_row]
+        for idx, insight in enumerate(row_insights):
             items = insight.get("items") or []
             rendered_items = []
             for item in items:
@@ -332,14 +438,15 @@ def render_insight_cards(insights: list[dict]):
                 )
             badge_safe = html.escape(str(insight.get("badge", "")))
             title_safe = html.escape(str(insight.get("title", "")))
-            st.markdown(
-                card_template.format(
-                    badge=badge_safe,
-                    title=title_safe,
-                    items="".join(rendered_items) or "<div>데이터 없음</div>",
-                ),
-                unsafe_allow_html=True,
-            )
+            with cols[idx]:
+                st.markdown(
+                    card_template.format(
+                        badge=badge_safe,
+                        title=title_safe,
+                        items="".join(rendered_items) or "<div>데이터 없음</div>",
+                    ),
+                    unsafe_allow_html=True,
+                )
 
 
 def build_timeseries_with_dates(df: pd.DataFrame, label: str):
@@ -360,26 +467,34 @@ def build_timeseries_with_dates(df: pd.DataFrame, label: str):
     return ts
 
 
-def render_metrics(current_df: pd.DataFrame, previous_df: pd.DataFrame):
-    metrics = {
-        "조회 수": "조회 수",
-        "상담신청 수": "상담신청 수",
-    }
-    cols = st.columns(len(metrics))
-    for idx, (label, column) in enumerate(metrics.items()):
-        current_val = int(current_df[column].sum())
-        previous_val = int(previous_df[column].sum()) if not previous_df.empty else None
+def render_metrics(metric_rows: list[dict]):
+    if not metric_rows:
+        return
+    cols = st.columns(len(metric_rows))
+    for idx, metric in enumerate(metric_rows):
+        label = metric["label"]
+        current_raw = metric.get("current")
+        previous_raw = metric.get("previous")
+
+        current_display = "-"
         delta = None
-        if previous_val is not None:
+
+        if current_raw is not None:
+            current_val = int(current_raw)
+            current_display = f"{current_val:,}"
+
+        if current_raw is not None and previous_raw is not None:
+            previous_val = int(previous_raw)
             delta_numeric = current_val - previous_val
             if previous_val == 0:
                 delta = f"{delta_numeric:+,} (이전 기간 0)"
             else:
                 delta_percentage = (delta_numeric / previous_val) * 100
                 delta = f"{delta_numeric:+,} ({delta_percentage:+.1f}%)"
+
         cols[idx].metric(
             label,
-            f"{current_val:,}",
+            current_display,
             delta=delta or "비교 데이터 없음",
         )
 
@@ -406,17 +521,27 @@ def render_chart(current_df: pd.DataFrame):
 st.title("💜 CRM팀 기획전 성과 분석")
 st.markdown(
     """
-퀵사이트 대시보드([링크](https://ap-northeast-2.quicksight.aws.amazon.com/sn/account/babitalk-data-quicksight/dashboards/74afc507-059e-421c-910d-303f57ae1900/sheets/74afc507-059e-421c-910d-303f57ae1900_26f4f316-a3a6-4f09-9797-708c736937d5))에서 CSV를 내려받아 이 페이지에 업로드한 뒤, 사이드바에서 분석할 이벤트 ID와 분석 기간(기획전 진행기간)을 입력해주세요. 퀵사이트 대시보드에서 [대상일 - descending]을 선택해서 내려받는 것을 추천합니다. (약 최근 6개월 커버 가능) 이 페이지에 문제가 생기면 CRM팀 **@김예슬** 에게 문의해주세요.
+퀵사이트 대시보드([링크](https://ap-northeast-2.quicksight.aws.amazon.com/sn/account/babitalk-data-quicksight/dashboards/74afc507-059e-421c-910d-303f57ae1900/sheets/74afc507-059e-421c-910d-303f57ae1900_26f4f316-a3a6-4f09-9797-708c736937d5))에서 조회/상담 CSV와 CPV CSV를 내려받아 이 페이지에 업로드한 뒤, 사이드바에서 분석할 이벤트 ID와 분석 기간(기획전 진행기간)을 입력해주세요. 퀵사이트 대시보드에서 [대상일 - descending]을 선택해서 내려받는 것을 추천합니다. (약 최근 6개월 커버 가능) 이 페이지에 문제가 생기면 CRM팀 **@김예슬** 에게 문의해주세요.
 """
 )
 
-uploaded_file = st.file_uploader("CSV 파일을 업로드하세요.", type=["csv"])
-if uploaded_file is None:
-    st.info("분석을 시작하려면 CSV 파일을 업로드해주세요.")
+uploaded_file = st.file_uploader(
+    "조회/상담 CSV 파일을 업로드하세요.", type=["csv"], key="primary_csv"
+)
+cpv_uploaded_file = st.file_uploader(
+    "CPV CSV 파일을 업로드하세요.", type=["csv"], key="cpv_csv"
+)
+
+if uploaded_file is None and cpv_uploaded_file is None:
+    st.info("조회/상담 CSV 또는 CPV CSV 중 최소 하나를 업로드해주세요.")
     st.stop()
 
 try:
-    df = load_data(uploaded_file)
+    df = (
+        load_data(uploaded_file)
+        if uploaded_file
+        else pd.DataFrame(columns=REQUIRED_COLUMNS)
+    )
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
@@ -424,8 +549,29 @@ except Exception as exc:  # noqa: BLE001
     st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {exc}")
     st.stop()
 
+if uploaded_file is None:
+    st.warning("조회/상담 CSV가 없으면 조회 수 및 상담신청 지표는 제공되지 않습니다.")
+
+try:
+    cpv_df = (
+        load_cpv_data(cpv_uploaded_file)
+        if cpv_uploaded_file
+        else pd.DataFrame(columns=CPV_REQUIRED_COLUMNS)
+    )
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception as exc:  # noqa: BLE001
+    st.error(f"CPV 데이터를 불러오는 중 오류가 발생했습니다: {exc}")
+    st.stop()
+
+if cpv_uploaded_file is None:
+    st.info("CPV CSV를 업로드하면 CPV 매출 분석을 함께 확인할 수 있습니다.")
+
+combined_df = pd.concat([df, cpv_df], ignore_index=True)
+
 st.sidebar.header("분석 설정")
-event_options = get_event_options(df)
+event_options = get_event_options(combined_df)
 if not event_options:
     st.error("이벤트 정보가 포함된 데이터가 없습니다.")
     st.stop()
@@ -462,12 +608,19 @@ if not selected_event_ids:
     st.stop()
 
 event_df = df[df["이벤트 ID (식별자)"].isin(selected_event_ids)].copy()
+cpv_event_df = cpv_df[cpv_df["이벤트 ID (식별자)"].isin(selected_event_ids)].copy()
 
-if event_df.empty:
+if event_df.empty and cpv_event_df.empty:
     st.error("선택한 이벤트에 대한 데이터가 없습니다.")
     st.stop()
 
-start_date, end_date = get_date_range_input(event_df)
+if event_df.empty:
+    st.warning("선택한 이벤트에 대한 조회/상담 데이터가 없습니다.")
+if cpv_event_df.empty:
+    st.warning("선택한 이벤트에 대한 CPV 데이터가 없습니다.")
+
+date_input_df = event_df if not event_df.empty else cpv_event_df
+start_date, end_date = get_date_range_input(date_input_df)
 
 if start_date > end_date:
     st.sidebar.error("시작일은 종료일보다 이전이어야 합니다.")
@@ -484,6 +637,8 @@ current_period_df = filter_period(event_df, current_start, current_end)
 previous_end = current_start - timedelta(days=1)
 previous_start = previous_end - timedelta(days=period_days - 1)
 previous_period_df = filter_period(event_df, previous_start, previous_end)
+cpv_current_period_df = filter_period(cpv_event_df, current_start, current_end)
+cpv_previous_period_df = filter_period(cpv_event_df, previous_start, previous_end)
 
 st.subheader(f"선택된 이벤트 ({len(selected_event_ids)}개)")
 render_selected_events(selected_event_ids, event_lookup)
@@ -493,14 +648,56 @@ st.caption(
     f"(총 {period_days}일)"
 )
 
-if current_period_df.empty:
+if current_period_df.empty and cpv_current_period_df.empty:
     st.warning("선택된 기간 내 데이터가 없습니다. 다른 기간을 선택해주세요.")
     st.stop()
 
-render_metrics(current_period_df, previous_period_df)
+
+def _metric_sum(df: pd.DataFrame, column: str) -> int:
+    if df.empty or column not in df or df[column].dropna().empty:
+        return None
+    return int(df[column].sum())
+
+
+metric_rows = [
+    {
+        "label": "조회 수",
+        "current": _metric_sum(current_period_df, "조회 수"),
+        "previous": _metric_sum(previous_period_df, "조회 수")
+        if not previous_period_df.empty
+        else None,
+    },
+    {
+        "label": "상담신청 수",
+        "current": _metric_sum(current_period_df, "상담신청 수"),
+        "previous": _metric_sum(previous_period_df, "상담신청 수")
+        if not previous_period_df.empty
+        else None,
+    },
+    {
+        "label": "CPV 조회 수",
+        "current": _metric_sum(cpv_current_period_df, "CPV 조회 수"),
+        "previous": _metric_sum(cpv_previous_period_df, "CPV 조회 수")
+        if not cpv_previous_period_df.empty
+        else None,
+    },
+    {
+        "label": "CPV 매출",
+        "current": _metric_sum(cpv_current_period_df, "CPV 매출"),
+        "previous": _metric_sum(cpv_previous_period_df, "CPV 매출")
+        if not cpv_previous_period_df.empty
+        else None,
+    },
+]
+
+render_metrics(metric_rows)
 
 event_summary_df = build_event_summary(
-    current_period_df, previous_period_df, event_lookup
+    current_period_df,
+    previous_period_df,
+    cpv_current_period_df,
+    cpv_previous_period_df,
+    event_lookup,
 )
 event_insights = generate_event_insights(event_summary_df)
 event_summary_display = format_event_summary_display(event_summary_df)
