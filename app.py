@@ -535,7 +535,6 @@ cpv_uploaded_file = st.file_uploader(
 if uploaded_file is None and cpv_uploaded_file is None:
     st.info("조회/상담 CSV 또는 CPV CSV 중 최소 하나를 업로드해주세요.")
     st.stop()
-
 try:
     df = (
         load_data(uploaded_file)
@@ -624,6 +623,12 @@ start_date, end_date = get_date_range_input(date_input_df)
 
 if start_date > end_date:
     st.sidebar.error("시작일은 종료일보다 이전이어야 합니다.")
+    st.stop()
+
+analyze = st.sidebar.button("분석 시작", type="primary")
+
+if not analyze:
+    st.info("사이드바에서 이벤트와 기간을 선택한 뒤 '분석 시작' 버튼을 누르면 결과가 표시됩니다.")
     st.stop()
 
 current_start = pd.Timestamp(start_date)
