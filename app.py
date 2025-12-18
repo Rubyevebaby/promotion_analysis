@@ -38,6 +38,37 @@ div[data-testid="stDownloadButton"] > button:active {
     unsafe_allow_html=True,
 )
 
+def safe_concat(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    non_empty = [df for df in frames if df is not None and not df.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    return pd.concat(non_empty, ignore_index=True)
+
+
+def _seek_start(file) -> None:
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+
+
+def _resolve_rename_and_usecols(
+    header_cols: list[str],
+    required_columns: list[str],
+    aliases: dict[str, list[str]],
+) -> tuple[dict[str, str], list[str]]:
+    rename_map: dict[str, str] = {}
+    usecols: list[str] = []
+    for required in required_columns:
+        candidates = aliases.get(required, [required])
+        matched = next((c for c in candidates if c in header_cols), None)
+        if matched is None:
+            continue
+        rename_map[matched] = required
+        usecols.append(matched)
+    return rename_map, usecols
+
+
 REQUIRED_COLUMNS = [
     "병원 ID",
     "병원 이름",
@@ -108,7 +139,7 @@ def normalize_columns(
 
 @st.cache_data(show_spinner=True)
 def load_data(file) -> pd.DataFrame:
-    df = pd.read_csv(file, encoding="utf-8-sig")
+    df = pd.read_csv(file, encoding="utf-8-sig", low_memory=False)
     df = normalize_columns(df, REQUIRED_COLUMNS, COLUMN_ALIASES)
 
     df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
@@ -195,9 +226,99 @@ def load_primary_data(file) -> pd.DataFrame:
     return out
 
 
+@st.cache_data(show_spinner=False)
+def load_primary_meta(file) -> pd.DataFrame:
+    # Try existing format meta read (header row is the first row)
+    _seek_start(file)
+    try:
+        header = pd.read_csv(file, encoding="utf-8-sig", nrows=0).columns.tolist()
+        meta_required = ["이벤트 ID (식별자)", "이벤트 이름", "대상일", "병원 이름"]
+        rename_map, usecols = _resolve_rename_and_usecols(
+            header, meta_required, COLUMN_ALIASES
+        )
+        if "대상일" not in rename_map.values() or "이벤트 ID (식별자)" not in rename_map.values():
+            raise ValueError("not_primary_format")
+        _seek_start(file)
+        df = pd.read_csv(
+            file,
+            encoding="utf-8-sig",
+            usecols=usecols,
+            low_memory=False,
+        ).rename(columns=rename_map)
+        df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
+        df["이벤트 ID (식별자)"] = df["이벤트 ID (식별자)"].astype(str)
+        return df
+    except Exception:
+        pass
+
+    # Amplitude format meta read (header row is the 4th row)
+    _seek_start(file)
+    df = pd.read_csv(file, encoding="utf-8-sig", skiprows=3, nrows=0)
+    header = [_clean_text(c) for c in df.columns.tolist()]
+
+    def find_column(candidates: list[str]) -> Optional[str]:
+        candidates_lower = {c.lower(): c for c in header}
+        for cand in candidates:
+            if cand in header:
+                return cand
+            lc = cand.lower()
+            if lc in candidates_lower:
+                return candidates_lower[lc]
+        return None
+
+    event_id_col = find_column(["event_id", "이벤트 ID", "이벤트ID"])
+    date_col = find_column(["date", "day", "대상일", "일자", "날짜"])
+    event_name_col = find_column(["event_name", "이벤트명", "이벤트 이름"])
+    if event_id_col is None or date_col is None:
+        raise ValueError("지원하지 않는 조회/상담 CSV 형식입니다.")
+
+    usecols = [c for c in [event_id_col, date_col, event_name_col] if c is not None]
+    _seek_start(file)
+    raw = pd.read_csv(file, encoding="utf-8-sig", skiprows=3, usecols=usecols)
+    raw.columns = [_clean_text(c) for c in raw.columns]
+
+    meta = pd.DataFrame(index=raw.index, columns=["이벤트 ID (식별자)", "이벤트 이름", "대상일", "병원 이름"])
+    meta["이벤트 ID (식별자)"] = raw[event_id_col].map(_clean_text).astype(str)
+    if event_name_col is not None and event_name_col in raw.columns:
+        meta["이벤트 이름"] = raw[event_name_col].map(_clean_text)
+    meta["대상일"] = pd.to_datetime(raw[date_col].map(_clean_text), errors="coerce")
+    return meta
+
+
+@st.cache_data(show_spinner=False)
+def load_cpv_meta(file) -> pd.DataFrame:
+    _seek_start(file)
+    header = pd.read_csv(file, encoding="utf-8-sig", nrows=0).columns.tolist()
+    meta_required = [
+        "이벤트 ID (식별자)",
+        "이벤트 이름",
+        "대상일",
+        "병원 이름",
+        "대카테고리명",
+        "중카테고리명",
+        "소카테고리명",
+        "이벤트 할인가",
+    ]
+    rename_map, usecols = _resolve_rename_and_usecols(
+        header, meta_required, CPV_COLUMN_ALIASES
+    )
+    if "대상일" not in rename_map.values() or "이벤트 ID (식별자)" not in rename_map.values():
+        raise ValueError("지원하지 않는 CPV CSV 형식입니다.")
+    _seek_start(file)
+    df = pd.read_csv(
+        file,
+        encoding="utf-8-sig",
+        usecols=usecols,
+        low_memory=False,
+    ).rename(columns=rename_map)
+    df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
+    df["이벤트 ID (식별자)"] = df["이벤트 ID (식별자)"].astype(str)
+    return df
+
+
 @st.cache_data(show_spinner=True)
 def load_cpv_data(file) -> pd.DataFrame:
-    df = pd.read_csv(file, encoding="utf-8-sig")
+    df = pd.read_csv(file, encoding="utf-8-sig", low_memory=False)
     df = normalize_columns(df, CPV_REQUIRED_COLUMNS, CPV_COLUMN_ALIASES)
     df["대상일"] = pd.to_datetime(df["대상일"], errors="coerce")
     if df["대상일"].isna().any():
@@ -248,7 +369,7 @@ def render_selected_events(selected_ids: list[str], event_lookup: dict[str, str]
     ]
     df = pd.DataFrame(data)
     with st.expander("선택된 이벤트 목록", expanded=False):
-        st.dataframe(df, hide_index=True, use_container_width=True, height=240)
+        st.dataframe(df, hide_index=True, width="stretch", height=240)
 
 
 def get_date_range_input(df: pd.DataFrame):
@@ -699,7 +820,7 @@ def render_chart(current_df: pd.DataFrame):
         labels={"DayLabel": "경과 일수 (날짜)", "상담신청 수": "상담신청 수"},
     )
     fig.update_layout(height=400, hovermode="x unified", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 st.title("💜 CRM팀 기획전 성과 분석")
@@ -719,42 +840,55 @@ cpv_uploaded_file = st.file_uploader(
 if uploaded_file is None and cpv_uploaded_file is None:
     st.info("조회/상담 CSV 또는 CPV CSV 중 최소 하나를 업로드해주세요.")
     st.stop()
+
 try:
-    df = (
-        load_primary_data(uploaded_file)
+    df_meta = (
+        load_primary_meta(uploaded_file)
         if uploaded_file
-        else pd.DataFrame(columns=REQUIRED_COLUMNS)
+        else pd.DataFrame(columns=["이벤트 ID (식별자)", "이벤트 이름", "대상일", "병원 이름"])
     )
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
 except Exception as exc:  # noqa: BLE001
-    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {exc}")
+    st.error(f"조회/상담 CSV를 불러오는 중 오류가 발생했습니다: {exc}")
     st.stop()
-
-if uploaded_file is None:
-    st.warning("조회/상담 CSV가 없으면 조회 수 및 상담신청 지표는 제공되지 않습니다.")
 
 try:
-    cpv_df = (
-        load_cpv_data(cpv_uploaded_file)
+    cpv_meta = (
+        load_cpv_meta(cpv_uploaded_file)
         if cpv_uploaded_file
-        else pd.DataFrame(columns=CPV_REQUIRED_COLUMNS)
+        else pd.DataFrame(
+            columns=[
+                "이벤트 ID (식별자)",
+                "이벤트 이름",
+                "대상일",
+                "병원 이름",
+                "대카테고리명",
+                "중카테고리명",
+                "소카테고리명",
+                "이벤트 할인가",
+            ]
+        )
     )
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
 except Exception as exc:  # noqa: BLE001
-    st.error(f"CPV 데이터를 불러오는 중 오류가 발생했습니다: {exc}")
+    st.error(f"CPV CSV를 불러오는 중 오류가 발생했습니다: {exc}")
     st.stop()
 
-if cpv_uploaded_file is None:
-    st.info("CPV CSV를 업로드하면 CPV 매출 분석을 함께 확인할 수 있습니다.")
+combined_meta = safe_concat([df_meta, cpv_meta])
+if combined_meta.empty:
+    st.error("업로드한 파일에서 이벤트/날짜 정보를 찾지 못했습니다.")
+    st.stop()
 
-combined_df = pd.concat([df, cpv_df], ignore_index=True)
+combined_meta = combined_meta.dropna(subset=["대상일"])
+if combined_meta.empty:
+    st.error("날짜(대상일) 데이터가 없어 분석을 진행할 수 없습니다.")
+    st.stop()
 
-st.sidebar.header("분석 설정")
-event_options = get_event_options(combined_df)
+event_options = get_event_options(combined_meta)
 if not event_options:
     st.error("이벤트 정보가 포함된 데이터가 없습니다.")
     st.stop()
@@ -762,12 +896,9 @@ if not event_options:
 event_lookup = {event_id: event_name for event_id, event_name in event_options}
 available_ids = list(event_lookup.keys())
 
-combined_dates = combined_df.dropna(subset=["대상일"])
-if combined_dates.empty:
-    st.error("날짜(대상일) 데이터가 없어 분석을 진행할 수 없습니다.")
-    st.stop()
-min_date = combined_dates["대상일"].min().date()
-max_date = combined_dates["대상일"].max().date()
+min_date = combined_meta["대상일"].min().date()
+max_date = combined_meta["대상일"].max().date()
+st.sidebar.header("분석 설정")
 
 default_event_input = available_ids[0] if available_ids else ""
 if "analysis_params" not in st.session_state:
@@ -776,8 +907,8 @@ if "analysis_params" not in st.session_state:
 with st.sidebar.form("analysis_form"):
     with st.expander("이벤트 ID 목록 보기"):
         st.dataframe(
-            pd.DataFrame(event_options, columns=["이벤트 ID", "이벤트 이름"]),
-            use_container_width=True,
+            pd.DataFrame(event_options, columns=["이벤트 ID", "이벤트 이름"]).head(300),
+            width="stretch",
         )
     event_input = st.text_area(
         "분석할 이벤트 ID (줄바꿈 또는 쉼표로 구분)",
@@ -825,6 +956,37 @@ if st.session_state.analysis_params is None:
 selected_event_ids = st.session_state.analysis_params["selected_event_ids"]
 start_date = st.session_state.analysis_params["start_date"]
 end_date = st.session_state.analysis_params["end_date"]
+
+try:
+    df = (
+        load_primary_data(uploaded_file)
+        if uploaded_file
+        else pd.DataFrame(columns=REQUIRED_COLUMNS)
+    )
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception as exc:  # noqa: BLE001
+    st.error(f"조회/상담 CSV를 불러오는 중 오류가 발생했습니다: {exc}")
+    st.stop()
+
+try:
+    cpv_df = (
+        load_cpv_data(cpv_uploaded_file)
+        if cpv_uploaded_file
+        else pd.DataFrame(columns=CPV_REQUIRED_COLUMNS)
+    )
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception as exc:  # noqa: BLE001
+    st.error(f"CPV CSV를 불러오는 중 오류가 발생했습니다: {exc}")
+    st.stop()
+
+if uploaded_file is None:
+    st.warning("조회/상담 CSV가 없으면 조회 수 및 상담신청 지표는 제공되지 않습니다.")
+if cpv_uploaded_file is None:
+    st.info("CPV CSV를 업로드하면 CPV 매출 분석을 함께 확인할 수 있습니다.")
 
 event_df = df[df["이벤트 ID (식별자)"].isin(selected_event_ids)].copy()
 cpv_event_df = cpv_df[cpv_df["이벤트 ID (식별자)"].isin(selected_event_ids)].copy()
@@ -925,7 +1087,7 @@ with tab_insight:
         st.markdown("##### 이벤트별 상세 지표")
         st.dataframe(
             event_summary_display,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         csv_bytes = event_summary_df.to_csv(index=False, encoding="utf-8-sig").encode(
@@ -946,4 +1108,5 @@ with tab_trend:
     render_chart(current_period_df)
 
 with st.expander("원본 데이터 미리보기"):
-    st.dataframe(event_df.sort_values("대상일"), use_container_width=True)
+    preview_df = event_df.sort_values("대상일").head(500)
+    st.dataframe(preview_df, width="stretch", hide_index=True)
