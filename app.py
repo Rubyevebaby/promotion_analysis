@@ -193,7 +193,7 @@ def load_primary_data(file) -> pd.DataFrame:
         return None
 
     event_id_col = find_column(["event_id", "이벤트 ID", "이벤트ID"])
-    date_col = find_column(["date", "day", "Time", "대상일", "일자", "날짜"])
+    date_col = find_column(["Time", "time", "date", "day", "대상일", "일자", "날짜"])
     view_col = find_column(["pageview_event.detail--All Users"])
     apply_col = find_column(["apply_event--All Users"])
     event_name_col = find_column(["event_name", "이벤트명", "이벤트 이름"])
@@ -254,25 +254,33 @@ def load_primary_meta(file) -> pd.DataFrame:
     # Amplitude format meta read (header row is the 4th row)
     _seek_start(file)
     df = pd.read_csv(file, encoding="utf-8-sig", skiprows=3, nrows=0)
-    header = [_clean_text(c) for c in df.columns.tolist()]
+    raw_header = df.columns.tolist()
+    clean_to_raw: dict[str, str] = {}
+    header: list[str] = []
+    for raw in raw_header:
+        clean = _clean_text(raw)
+        header.append(clean)
+        if clean and clean not in clean_to_raw:
+            clean_to_raw[clean] = raw
 
-    def find_column(candidates: list[str]) -> Optional[str]:
-        candidates_lower = {c.lower(): c for c in header}
+    def find_column(candidates: list[str]) -> tuple[Optional[str], Optional[str]]:
+        candidates_lower = {c.lower(): c for c in header if c}
         for cand in candidates:
             if cand in header:
-                return cand
+                return cand, clean_to_raw.get(cand, cand)
             lc = cand.lower()
             if lc in candidates_lower:
-                return candidates_lower[lc]
-        return None
+                clean = candidates_lower[lc]
+                return clean, clean_to_raw.get(clean, clean)
+        return None, None
 
-    event_id_col = find_column(["event_id", "이벤트 ID", "이벤트ID"])
-    date_col = find_column(["date", "day", "대상일", "일자", "날짜"])
-    event_name_col = find_column(["event_name", "이벤트명", "이벤트 이름"])
-    if event_id_col is None or date_col is None:
+    event_id_col, event_id_raw = find_column(["event_id", "이벤트 ID", "이벤트ID"])
+    date_col, date_raw = find_column(["Time", "time", "date", "day", "대상일", "일자", "날짜"])
+    event_name_col, event_name_raw = find_column(["event_name", "이벤트명", "이벤트 이름"])
+    if event_id_col is None or date_col is None or event_id_raw is None or date_raw is None:
         raise ValueError("지원하지 않는 조회/상담 CSV 형식입니다.")
 
-    usecols = [c for c in [event_id_col, date_col, event_name_col] if c is not None]
+    usecols = [c for c in [event_id_raw, date_raw, event_name_raw] if c is not None]
     _seek_start(file)
     raw = pd.read_csv(file, encoding="utf-8-sig", skiprows=3, usecols=usecols)
     raw.columns = [_clean_text(c) for c in raw.columns]
