@@ -1152,7 +1152,7 @@ def render_chart(current_df: pd.DataFrame):
 st.title("💜 CRM팀 기획전 성과 분석")
 st.markdown(
     """
-기획전 성과 CSV는 앰플리튜드([링크](https://app.amplitude.com/analytics/babitalk/chart/g7sowyhf)) 또는 퀵사이트([링크](https://ap-northeast-2.quicksight.aws.amazon.com/sn/account/babitalk-data-quicksight/dashboards/74afc507-059e-421c-910d-303f57ae1900/sheets/74afc507-059e-421c-910d-303f57ae1900_01e8ddcf-7b44-4d69-8cd4-7eb22915f9ec))에서 다운로드해 업로드해주세요.\n파일을 업로드한 뒤 사이드바에서 분석할 이벤트 ID와 분석 기간(기획전 진행기간)을 선택하고, '분석 시작'을 눌러주세요.\n이 페이지에 문제가 생기면 CRM팀 **@김예슬** 에게 문의해주세요.🍀\n\n*CSV에는 비교하고자 하는 분석 기간이 포함되어 있어야 합니다.
+기획전 성과 CSV는 퀵사이트 기획전 성과 대시보드에서 raw 파일을 다운로드해 업로드해주세요. 파일을 업로드하면 raw 파일에 포함된 eid가 자동으로 선택됩니다. 기간을 지정한 뒤 '분석 시작'을 눌러주세요. 이 페이지에 문제가 생기면 CRM팀 **@김예슬** 에게 문의해주세요.🍀
 """
 )
 
